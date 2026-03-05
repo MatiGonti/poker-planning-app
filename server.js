@@ -2,11 +2,10 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
-import GameState from './gameState.js';
+import * as gamesManager from './gamesManager.js';
 
 const app = express();
 
-// Add logging middleware
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.url}`);
   next();
@@ -15,91 +14,111 @@ app.use((req, res, next) => {
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: "*",  // Allow all origins for now to rule out CORS issues
-    methods: ["GET", "POST"]
-  }
+    origin: '*',
+    methods: ['GET', 'POST'],
+  },
 });
 
 app.use(cors());
 app.use(express.json());
 
-const gameState = new GameState();
+// Which game each socket is in (socketId -> gameCode)
+const socketToGame = new Map();
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', participants: gameState.getParticipantsList().length });
-});
+function getSocketGameCode(socket) {
+  return socketToGame.get(socket.id);
+}
 
 io.on('connection', (socket) => {
   console.log('✅ User connected:', socket.id);
-  console.log('Transport:', socket.conn.transport.name);
-  console.log('Total participants:', gameState.getParticipantsList().length);
 
-  // Handle user joining the game
-  socket.on('join-game', ({ name, avatar }) => {
-    console.log(`${name} joined with avatar ${avatar}`);
-    gameState.addParticipant(socket.id, name, avatar);
-    
-    // Send current game state to the new participant
-    socket.emit('game-state', gameState.getState());
-    
-    // Broadcast updated participants list to all clients
-    io.emit('participants-updated', gameState.getParticipantsList());
+  socket.on('join-game', ({ gameCode, name, avatar }) => {
+    const isCreate = !gameCode || !String(gameCode).trim();
+
+    if (isCreate) {
+      const { gameCode: newCode, displayName } = gamesManager.createGame();
+      const entry = gamesManager.joinGame(newCode, socket.id, name, avatar);
+      if (!entry) {
+        socket.emit('join-error', { message: 'Failed to create game' });
+        return;
+      }
+      socketToGame.set(socket.id, newCode);
+      socket.join(newCode);
+      const state = gamesManager.getGameState(newCode);
+      socket.emit('game-state', state);
+      io.to(newCode).emit('participants-updated', state.participants);
+      console.log(`Game created: ${newCode} (${displayName}), ${name} joined`);
+      return;
+    }
+
+    const normalizedCode = String(gameCode).trim().toLowerCase();
+    const entry = gamesManager.joinGame(normalizedCode, socket.id, name, avatar);
+    if (!entry) {
+      socket.emit('join-error', { message: 'Game not found. Check the code or create a new game.' });
+      return;
+    }
+    socketToGame.set(socket.id, normalizedCode);
+    socket.join(normalizedCode);
+    const state = gamesManager.getGameState(normalizedCode);
+    socket.emit('game-state', state);
+    io.to(normalizedCode).emit('participants-updated', state.participants);
+    console.log(`${name} joined game ${normalizedCode}`);
   });
 
-  // Handle vote submission
   socket.on('submit-vote', (vote) => {
-    console.log(`${socket.id} voted: ${vote}`);
-    gameState.submitVote(socket.id, vote);
-    
-    // Broadcast updated participants list (to show who has voted)
-    io.emit('participants-updated', gameState.getParticipantsList());
+    const gameCode = getSocketGameCode(socket);
+    if (!gameCode) return;
+    const participants = gamesManager.submitVote(gameCode, socket.id, vote);
+    if (participants) io.to(gameCode).emit('participants-updated', participants);
   });
 
-  // Handle starting a new voting round
   socket.on('start-voting', (taskName) => {
-    console.log(`New voting round started: ${taskName}`);
-    gameState.startNewVoting(taskName);
-    
-    // Broadcast to all clients
-    io.emit('voting-started', {
-      taskName,
-      participants: gameState.getParticipantsList()
-    });
+    const gameCode = getSocketGameCode(socket);
+    if (!gameCode) return;
+    const data = gamesManager.startNewVoting(gameCode, taskName);
+    if (data) io.to(gameCode).emit('voting-started', data);
   });
 
-  // Handle revealing votes
   socket.on('reveal-votes', () => {
-    console.log('Votes revealed');
-    gameState.revealVotes();
-    
-    const results = gameState.getResults();
-    io.emit('votes-revealed', results);
+    const gameCode = getSocketGameCode(socket);
+    if (!gameCode) return;
+    const results = gamesManager.revealVotes(gameCode);
+    if (results !== null) io.to(gameCode).emit('votes-revealed', results);
   });
 
-  // Handle clearing votes
   socket.on('clear-votes', () => {
-    console.log('Votes cleared');
-    gameState.clearVotes();
-    
-    io.emit('votes-cleared', {
-      participants: gameState.getParticipantsList()
-    });
+    const gameCode = getSocketGameCode(socket);
+    if (!gameCode) return;
+    const participants = gamesManager.clearVotes(gameCode);
+    if (participants) io.to(gameCode).emit('votes-cleared', { participants });
   });
 
-  // Handle disconnection
   socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
-    gameState.removeParticipant(socket.id);
-    
-    // Broadcast updated participants list
-    io.emit('participants-updated', gameState.getParticipantsList());
+    const gameCode = getSocketGameCode(socket);
+    socketToGame.delete(socket.id);
+    if (!gameCode) {
+      console.log('User disconnected (no game):', socket.id);
+      return;
+    }
+    const result = gamesManager.removeParticipantAndMaybeClose(gameCode, socket.id);
+    const state = gamesManager.getGameState(gameCode);
+    if (result?.closed) {
+      io.to(gameCode).emit('game-closed', { message: 'Last person left. Game closed.' });
+      console.log(`Game closed: ${gameCode}`);
+    } else if (state) {
+      io.to(gameCode).emit('participants-updated', state.participants);
+    }
+    console.log('User disconnected:', socket.id, 'from game', gameCode);
   });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
 });
 
 const PORT = process.env.PORT || 3000;
 
 httpServer.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`WebSocket ready for connections`);
+  console.log('WebSocket ready for connections');
 });
