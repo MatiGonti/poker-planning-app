@@ -1,14 +1,19 @@
+/** Default voting scale (same as original app) */
+const DEFAULT_VOTING_OPTIONS = ['0.5', '1', '1.5', '2', '2.5', '3', '3.5', '4', '5', '7', '8', '10', '20', '?'];
+
 /**
  * Game State Manager
  * Manages the in-memory state for the poker planning game
  */
-
 class GameState {
-  constructor() {
+  constructor(votingOptions = DEFAULT_VOTING_OPTIONS) {
     this.participants = new Map(); // socketId -> { name, avatar, voted: boolean }
     this.votes = new Map(); // socketId -> vote value
     this.currentTask = '';
     this.votesRevealed = false;
+    this.votingOptions = Array.isArray(votingOptions) && votingOptions.length > 0
+      ? votingOptions
+      : DEFAULT_VOTING_OPTIONS;
   }
 
   addParticipant(socketId, name, avatar) {
@@ -30,6 +35,14 @@ class GameState {
       this.votes.set(socketId, vote);
       const participant = this.participants.get(socketId);
       participant.voted = true;
+    }
+  }
+
+  retractVote(socketId) {
+    if (this.participants.has(socketId)) {
+      this.votes.delete(socketId);
+      const participant = this.participants.get(socketId);
+      participant.voted = false;
     }
   }
 
@@ -121,7 +134,8 @@ class GameState {
       participants: this.getParticipantsList(),
       currentTask: this.currentTask,
       votesRevealed: this.votesRevealed,
-      results: this.votesRevealed ? this.getResults() : null
+      results: this.votesRevealed ? this.getResults() : null,
+      votingOptions: this.votingOptions
     };
   }
 }

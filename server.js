@@ -29,14 +29,25 @@ function getSocketGameCode(socket) {
   return socketToGame.get(socket.id);
 }
 
+function getParticipantName(gameCode, socketId) {
+  const state = gamesManager.getGameState(gameCode);
+  if (!state || !state.participants) return 'Someone';
+  const p = state.participants.find((x) => x.id === socketId);
+  return p ? p.name : 'Someone';
+}
+
+function emitGameLog(io, gameCode, entry) {
+  io.to(gameCode).emit('game-log', entry);
+}
+
 io.on('connection', (socket) => {
   console.log('✅ User connected:', socket.id);
 
-  socket.on('join-game', ({ gameCode, name, avatar }) => {
+  socket.on('join-game', ({ gameCode, name, avatar, scale }) => {
     const isCreate = !gameCode || !String(gameCode).trim();
 
     if (isCreate) {
-      const { gameCode: newCode, displayName } = gamesManager.createGame();
+      const { gameCode: newCode, displayName } = gamesManager.createGame(scale);
       const entry = gamesManager.joinGame(newCode, socket.id, name, avatar);
       if (!entry) {
         socket.emit('join-error', { message: 'Failed to create game' });
@@ -45,8 +56,9 @@ io.on('connection', (socket) => {
       socketToGame.set(socket.id, newCode);
       socket.join(newCode);
       const state = gamesManager.getGameState(newCode);
-      socket.emit('game-state', state);
+      socket.emit('game-state', { ...state, gameLog: [] });
       io.to(newCode).emit('participants-updated', state.participants);
+      emitGameLog(io, newCode, { type: 'joined', name });
       console.log(`Game created: ${newCode} (${displayName}), ${name} joined`);
       return;
     }
@@ -60,8 +72,9 @@ io.on('connection', (socket) => {
     socketToGame.set(socket.id, normalizedCode);
     socket.join(normalizedCode);
     const state = gamesManager.getGameState(normalizedCode);
-    socket.emit('game-state', state);
+    socket.emit('game-state', { ...state, gameLog: [] });
     io.to(normalizedCode).emit('participants-updated', state.participants);
+    emitGameLog(io, normalizedCode, { type: 'joined', name });
     console.log(`${name} joined game ${normalizedCode}`);
   });
 
@@ -69,6 +82,16 @@ io.on('connection', (socket) => {
     const gameCode = getSocketGameCode(socket);
     if (!gameCode) return;
     const participants = gamesManager.submitVote(gameCode, socket.id, vote);
+    if (participants) {
+      io.to(gameCode).emit('participants-updated', participants);
+      emitGameLog(io, gameCode, { type: 'voted', name: getParticipantName(gameCode, socket.id) });
+    }
+  });
+
+  socket.on('retract-vote', () => {
+    const gameCode = getSocketGameCode(socket);
+    if (!gameCode) return;
+    const participants = gamesManager.retractVote(gameCode, socket.id);
     if (participants) io.to(gameCode).emit('participants-updated', participants);
   });
 
@@ -76,21 +99,30 @@ io.on('connection', (socket) => {
     const gameCode = getSocketGameCode(socket);
     if (!gameCode) return;
     const data = gamesManager.startNewVoting(gameCode, taskName);
-    if (data) io.to(gameCode).emit('voting-started', data);
+    if (data) {
+      io.to(gameCode).emit('voting-started', data);
+      emitGameLog(io, gameCode, { type: 'started-voting', name: getParticipantName(gameCode, socket.id), taskName });
+    }
   });
 
   socket.on('reveal-votes', () => {
     const gameCode = getSocketGameCode(socket);
     if (!gameCode) return;
     const results = gamesManager.revealVotes(gameCode);
-    if (results !== null) io.to(gameCode).emit('votes-revealed', results);
+    if (results !== null) {
+      io.to(gameCode).emit('votes-revealed', results);
+      emitGameLog(io, gameCode, { type: 'revealed-results', name: getParticipantName(gameCode, socket.id) });
+    }
   });
 
   socket.on('clear-votes', () => {
     const gameCode = getSocketGameCode(socket);
     if (!gameCode) return;
     const participants = gamesManager.clearVotes(gameCode);
-    if (participants) io.to(gameCode).emit('votes-cleared', { participants });
+    if (participants) {
+      io.to(gameCode).emit('votes-cleared', { participants });
+      emitGameLog(io, gameCode, { type: 'cleared-results', name: getParticipantName(gameCode, socket.id) });
+    }
   });
 
   socket.on('disconnect', () => {
@@ -100,6 +132,7 @@ io.on('connection', (socket) => {
       console.log('User disconnected (no game):', socket.id);
       return;
     }
+    const leftName = getParticipantName(gameCode, socket.id);
     const result = gamesManager.removeParticipantAndMaybeClose(gameCode, socket.id);
     const state = gamesManager.getGameState(gameCode);
     if (result?.closed) {
@@ -107,6 +140,7 @@ io.on('connection', (socket) => {
       console.log(`Game closed: ${gameCode}`);
     } else if (state) {
       io.to(gameCode).emit('participants-updated', state.participants);
+      emitGameLog(io, gameCode, { type: 'left', name: leftName });
     }
     console.log('User disconnected:', socket.id, 'from game', gameCode);
   });

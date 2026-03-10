@@ -5,6 +5,21 @@
 
 import GameState from './gameState.js';
 
+const DEFAULT_VOTING_OPTIONS = ['0.5', '1', '1.5', '2', '2.5', '3', '3.5', '4', '5', '7', '8', '10', '20', '?'];
+const FIBONACCI_OPTIONS = ['1', '2', '3', '5', '8', '13', '21', '?'];
+
+function parseVotingOptions(scale) {
+  if (!scale || scale === 'default') return DEFAULT_VOTING_OPTIONS;
+  if (scale === 'fibonacci') return FIBONACCI_OPTIONS;
+  const custom = String(scale)
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (custom.length === 0) return DEFAULT_VOTING_OPTIONS;
+  if (!custom.includes('?')) custom.push('?');
+  return custom;
+}
+
 // Lord of the Rings themed funny / memorable phrases (slug-style for codes)
 const LOTR_CODES = [
   'second-breakfast',
@@ -57,9 +72,10 @@ function generateGameCode() {
 
 const games = new Map(); // gameCode -> { gameState: GameState }
 
-export function createGame() {
+export function createGame(scaleOrOptions) {
   const { code, displayName } = generateGameCode();
-  const gameState = new GameState();
+  const votingOptions = parseVotingOptions(scaleOrOptions);
+  const gameState = new GameState(votingOptions);
   games.set(code, { gameState, displayName });
   return { gameCode: code, displayName };
 }
@@ -105,6 +121,13 @@ export function submitVote(gameCode, socketId, vote) {
   const entry = getGame(gameCode);
   if (!entry) return null;
   entry.gameState.submitVote(socketId, vote);
+  return entry.gameState.getParticipantsList();
+}
+
+export function retractVote(gameCode, socketId) {
+  const entry = getGame(gameCode);
+  if (!entry) return null;
+  entry.gameState.retractVote(socketId);
   return entry.gameState.getParticipantsList();
 }
 
