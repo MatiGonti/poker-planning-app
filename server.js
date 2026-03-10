@@ -92,7 +92,10 @@ io.on('connection', (socket) => {
     const gameCode = getSocketGameCode(socket);
     if (!gameCode) return;
     const participants = gamesManager.retractVote(gameCode, socket.id);
-    if (participants) io.to(gameCode).emit('participants-updated', participants);
+    if (participants) {
+      io.to(gameCode).emit('participants-updated', participants);
+      emitGameLog(io, gameCode, { type: 'retracted-vote', name: getParticipantName(gameCode, socket.id) });
+    }
   });
 
   socket.on('start-voting', (taskName) => {
